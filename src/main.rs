@@ -1,4 +1,5 @@
-use std::ops::ControlFlow;
+use std::fs::read_to_string;
+use std::ops::{ControlFlow, RangeBounds};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -12,10 +13,11 @@ use futures::channel::oneshot;
 use lsp_types::notification::{LogMessage, Progress, PublishDiagnostics, ShowMessage};
 use lsp_types::request::Request;
 use lsp_types::{
-    ClientCapabilities, DidOpenTextDocumentParams, InitializeParams, InitializedParams,
-    NumberOrString, ProgressParamsValue, TextDocumentItem, Url, WindowClientCapabilities,
-    WorkDoneProgress, WorkspaceFolder,
+    ClientCapabilities, DidOpenTextDocumentParams, DocumentFormattingParams, InitializeParams,
+    InitializedParams, NumberOrString, ProgressParamsValue, TextDocumentItem, TextEdit, Url,
+    WindowClientCapabilities, WorkDoneProgress, WorkspaceFolder,
 };
+use ropey::Rope;
 use tower::ServiceBuilder;
 use tracing::{info, Level};
 
@@ -51,7 +53,7 @@ async fn main() -> color_eyre::Result<()> {
         .expect("test root should be valid");
 
     let mut real_file = root_dir.join(&args.file);
-    let text = std::fs::read_to_string(&real_file).wrap_err("couldn't read file")?;
+    let text = read_to_string(&real_file).wrap_err("couldn't read file")?;
     let url = Url::from_file_path(real_file.clone()).expect("file should be valid");
 
     let (indexed_tx, _) = oneshot::channel();
@@ -151,7 +153,49 @@ async fn main() -> color_eyre::Result<()> {
     match server.request::<InferIntf>(vec![url]).await {
         Ok(text) => {
             real_file.set_extension("mli");
-            std::fs::write(&real_file, text).wrap_err("couldn't write file")?;
+            let target_uri = Url::from_file_path(real_file.clone()).expect("file should be valid");
+
+            // open the mli file to be formatted
+            server
+                .did_open(DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: target_uri.clone(),
+                        language_id: "ocaml".into(),
+                        version: 0,
+                        text: text.clone(),
+                    },
+                })
+                .wrap_err("couldn't open file")?;
+
+            // format the mli file
+            let format_result = server
+                .formatting(DocumentFormattingParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: target_uri },
+                    options: Default::default(),
+                    work_done_progress_params: Default::default(),
+                })
+                .await;
+
+            // check if the formatting was successful
+            if let Ok(result) = format_result {
+                let edits = result.unwrap_or_default();
+                let mut rope = Rope::from_str(&text);
+
+                // apply the edits to the mli file
+                for edit in edits {
+                    let start = rope.line_to_byte(edit.range.start.line as usize)
+                        + edit.range.start.character as usize;
+                    let end = rope.line_to_byte(edit.range.end.line as usize)
+                        + edit.range.end.character as usize;
+
+                    rope.remove(start..end);
+                    rope.insert(start, &edit.new_text);
+                }
+                std::fs::write(&real_file, rope.to_string()).wrap_err("couldn't write file")?;
+            } else {
+                std::fs::write(&real_file, text).wrap_err("couldn't write file")?;
+            }
+
             println!("{}", real_file.to_string_lossy());
         }
         Err(err) => {

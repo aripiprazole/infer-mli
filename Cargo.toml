@@ -7,7 +7,7 @@ authors = ["Gabrielle Guimarães de Oliveira"]
 keywords = ["lsp", "ocaml", "language-server", "infer"]
 categories = ["command-line-utilities", "development-tools"]
 repository = "https://github.com/aripiprazole/infer-mli"
-version = "1.0.1"
+version = "1.0.2"
 
 [dependencies]
 async-lsp = "0.2.0"
@@ -16,6 +16,7 @@ clap = { version = "4.5.19", features = ["derive"] }
 color-eyre = "0.6.3"
 futures = "0.3.30"
 lsp-types = "0.95.1"
+ropey = "1.6.1"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5.1"
 tracing = "0.1.40"
