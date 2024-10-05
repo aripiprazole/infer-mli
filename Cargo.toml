@@ -1,0 +1,16 @@
+[package]
+name = "infer-mli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-lsp = "0.2.0"
+async-process = "2.3.0"
+clap = { version = "4.5.19", features = ["derive"] }
+color-eyre = "0.6.3"
+futures = "0.3.30"
+lsp-types = "0.95.1"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5.1"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
