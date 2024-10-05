@@ -1,7 +1,13 @@
 [package]
 name = "infer-mli"
-version = "1.0.0"
+description = "Infer a .mli file from a .ml file using the OCaml Language Server"
+license = "MIT"
 edition = "2021"
+authors = ["Gabrielle Guimarães de Oliveira"]
+keywords = ["lsp", "ocaml", "language-server", "infer"]
+categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/aripiprazole/infer-mli"
+version = "1.0.1"
 
 [dependencies]
 async-lsp = "0.2.0"
