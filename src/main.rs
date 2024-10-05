@@ -1,12 +1,12 @@
 use std::fs::read_to_string;
-use std::ops::{ControlFlow, RangeBounds};
-use std::path::Path;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
-use async_lsp::LanguageServer;
+use async_lsp::{LanguageServer, ServerSocket};
 use clap::Parser;
 use color_eyre::eyre::Context;
 use futures::channel::oneshot;
@@ -19,7 +19,7 @@ use lsp_types::{
 };
 use ropey::Rope;
 use tower::ServiceBuilder;
-use tracing::{info, Level};
+use tracing::Level;
 
 struct ClientState {
     indexed_tx: Option<oneshot::Sender<()>>,
@@ -45,6 +45,66 @@ struct Args {
     file: String,
 }
 
+async fn infer_intf(socket: &mut ServerSocket, file: &mut PathBuf) -> color_eyre::Result<String> {
+    let url = Url::from_file_path(file.clone()).expect("file should be valid");
+    let text = socket
+        .request::<InferIntf>(vec![url])
+        .await
+        .wrap_err("couldn't infer interface")?;
+
+    file.set_extension("mli");
+
+    let mli_url = Url::from_file_path(file.clone()).expect("file should be valid");
+
+    // open the mli file to be formatted
+    open_file(socket, file.clone(), &text).await?;
+
+    // format the mli file
+    let format_result = socket
+        .formatting(DocumentFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: mli_url },
+            options: Default::default(),
+            work_done_progress_params: Default::default(),
+        })
+        .await;
+
+    // check if the formatting was successful
+    if let Ok(result) = format_result {
+        let mut rope = Rope::from_str(&text);
+        apply_edits(&mut rope, &result.unwrap_or_default());
+        Ok(rope.to_string())
+    } else {
+        Ok(text)
+    }
+}
+
+async fn open_file(socket: &mut ServerSocket, file: PathBuf, text: &str) -> color_eyre::Result<()> {
+    let url = Url::from_file_path(file).expect("file should be valid");
+    socket
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: url.clone(),
+                language_id: "ocaml".into(),
+                version: 0,
+                text: text.into(),
+            },
+        })
+        .wrap_err("couldn't open file")?;
+    Ok(())
+}
+
+fn apply_edits(text: &mut Rope, edits: &[TextEdit]) {
+    for edit in edits {
+        let start =
+            text.line_to_byte(edit.range.start.line as usize) + edit.range.start.character as usize;
+        let end =
+            text.line_to_byte(edit.range.end.line as usize) + edit.range.end.character as usize;
+
+        text.remove(start..end);
+        text.insert(start, &edit.new_text);
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> color_eyre::Result<()> {
     let args = Args::parse();
@@ -54,7 +114,6 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut real_file = root_dir.join(&args.file);
     let text = read_to_string(&real_file).wrap_err("couldn't read file")?;
-    let url = Url::from_file_path(real_file.clone()).expect("file should be valid");
 
     let (indexed_tx, _) = oneshot::channel();
 
@@ -139,69 +198,21 @@ async fn main() -> color_eyre::Result<()> {
         .initialized(InitializedParams {})
         .wrap_err("couldn't initialize")?;
 
-    server
-        .did_open(DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri: url.clone(),
-                language_id: "ocaml".into(),
-                version: 0,
-                text,
-            },
-        })
-        .wrap_err("couldn't open file")?;
+    open_file(&mut server, real_file.clone(), &text).await?;
 
-    match server.request::<InferIntf>(vec![url]).await {
-        Ok(text) => {
-            real_file.set_extension("mli");
-            let target_uri = Url::from_file_path(real_file.clone()).expect("file should be valid");
+    let Ok(text) = infer_intf(&mut server, &mut real_file).await else {
+        // Shutdown.
+        server.shutdown(()).await.wrap_err("couldn't shutdown")?;
+        server.exit(()).wrap_err("couldn't exit")?;
 
-            // open the mli file to be formatted
-            server
-                .did_open(DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem {
-                        uri: target_uri.clone(),
-                        language_id: "ocaml".into(),
-                        version: 0,
-                        text: text.clone(),
-                    },
-                })
-                .wrap_err("couldn't open file")?;
+        server.emit(Stop).wrap_err("couldn't emit stop event")?;
+        mainloop_fut.await.wrap_err("couldn't finish main loop")?;
 
-            // format the mli file
-            let format_result = server
-                .formatting(DocumentFormattingParams {
-                    text_document: lsp_types::TextDocumentIdentifier { uri: target_uri },
-                    options: Default::default(),
-                    work_done_progress_params: Default::default(),
-                })
-                .await;
+        return Ok(());
+    };
 
-            // check if the formatting was successful
-            if let Ok(result) = format_result {
-                let edits = result.unwrap_or_default();
-                let mut rope = Rope::from_str(&text);
-
-                // apply the edits to the mli file
-                for edit in edits {
-                    let start = rope.line_to_byte(edit.range.start.line as usize)
-                        + edit.range.start.character as usize;
-                    let end = rope.line_to_byte(edit.range.end.line as usize)
-                        + edit.range.end.character as usize;
-
-                    rope.remove(start..end);
-                    rope.insert(start, &edit.new_text);
-                }
-                std::fs::write(&real_file, rope.to_string()).wrap_err("couldn't write file")?;
-            } else {
-                std::fs::write(&real_file, text).wrap_err("couldn't write file")?;
-            }
-
-            println!("{}", real_file.to_string_lossy());
-        }
-        Err(err) => {
-            info!("Switching failed {err:?}")
-        }
-    }
+    std::fs::write(&real_file, text).wrap_err("couldn't write file")?;
+    println!("{}", real_file.to_string_lossy());
 
     // Shutdown.
     server.shutdown(()).await.wrap_err("couldn't shutdown")?;
